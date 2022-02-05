@@ -348,6 +348,62 @@ def beta_calc(
 
 #%%============================================================================
 
+def it_step1(
+    cov_mod, # om
+    beta_t, # beta_t_i
+    cov_pic, # cov_z1
+    y_bar_t, # y_bar_i
+    x_t, # x_t_i
+    comp='s1',
+    ):
+    
+    if comp == 's1': # original eqn for step 1
+        
+        cov_mod_inv = np.real(spla.inv(cov_mod))
+        cov_pic_inv = np.real(spla.inv(cov_pic))
+        m1 = np.real(
+            spla.inv(
+                np.matrix(
+                    (cov_mod_inv + np.dot(beta_t**2,cov_pic_inv))
+                    )
+                )
+            )
+        m2 = np.matrix(
+            (beta_t * np.dot(cov_pic_inv,y_bar_t) + np.dot(cov_mod_inv,x_t))
+            )
+        x_t_ast = np.dot(m1,m2)
+        
+    elif comp == 'd1': # appendix D/ eqn D1 for step 1
+        
+        cov_mod_sqrt = spla.fractional_matrix_power(cov_mod, -0.5)
+        cov_prod = np.dot(np.dot(cov_mod_sqrt,cov_pic),cov_mod_sqrt)
+        w,v = spla.eigh(cov_prod)
+        delta = np.diag(w)
+        # m1 = np.real(
+        #     spla.inv(
+        #         np.matrix(
+        #             (delta + beta_t**2 * np.identity(len(w)))
+        #             )
+        #         )
+        #     )
+        m1 = spla.inv(
+                np.matrix(
+                    (delta + beta_t**2 * np.identity(len(w)))
+                    )
+                )
+                
+        y_bar_tlde = np.dot(np.dot(v,cov_mod_sqrt),y_bar_t)
+        x_t_tlde = np.dot(np.dot(v,cov_mod_sqrt),x_t)
+        m2 = beta_t * y_bar_tlde + np.dot(delta,x_t_tlde)
+        x_t_tlde = np.dot(m1,m2) # test for i=1 (lu) against normal eqn to see if this needs further transformation to undo tlde
+        x_t_ast = np.dot(
+            spla.inv(cov_mod_sqrt),np.dot(spla.inv(v),x_t_tlde)
+            )
+        
+    return x_t_ast
+
+#%%============================================================================
+
 def extract_Z2(NZ, 
                frac_Z2, 
                sampling_name):

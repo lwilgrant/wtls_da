@@ -372,9 +372,10 @@ beta_hat = {}
 models.append('mmm')   
 
 obs = 'berkley_earth'
-mod = 'CNRM-ESM2-1'
+mod = 'CanESM5'
 gamma = 0.05 # precision level
-om_bs=100
+om_bs = 100
+comp = 'd1'
 nx = nx[mod]
     
 var_sfs[obs] = {}
@@ -438,21 +439,26 @@ proj = np.identity(X.shape[1]) # already took factorial LU, so no need for proj 
 # model based uncertainty estimate                   
 cov_omega = {}
 cov_omega_sqrt = {}
-boots = {}
 for exp in exp_list:
-    if exp == "historical":
+    if exp == 'historical':
         runs = nb_runs_x[0,0]
-    elif exp == "hist-noLu" or "lu":
+    elif exp == 'hist-noLu' or 'lu':
         runs = nb_runs_x[0,1]
     omega = omega_samples[mod][exp]
     omega = np.transpose(np.matrix(omega))
     omega = np.dot(U, omega)
-
     for i in np.arange(om_bs):
         boot = np.empty_like(omega)
         for r in range(runs):
-            index = np.random.randint(0,omega.shape[1])
-            boot[:,r] = np.array(omega[:,index])
+            if exp == 'historical' or 'hist-noLu':
+                index = np.random.randint(0,omega.shape[1])
+                boot[:,r] = np.array(omega[:,index])
+            elif exp == 'lu': # sample randomly from historical and histnolu for lu bootsrap
+                om_h = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['historical'])))
+                om_hnl = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['hist-noLu'])))
+                index_h = np.random.randint(0,om_h.shape[1])
+                index_hnl = np.random.randint(0,om_hnl.shape[1])
+                boot[:,r] = np.array(om_h[:,index_h]) - np.array(om_hnl[:,index_hnl])
         if i == 0:
             bs_smp = np.mean(boot,axis=1)
         else:
@@ -466,10 +472,10 @@ for exp in exp_list:
 # pic based IV estimates
 for r in np.arange(0,bs_reps):
     
-    # shuffle rows of ctl
-    ctl = np.take(ctl,
-                    np.random.permutation(ctl.shape[0]),
-                    axis=0)
+    # # shuffle rows of ctl
+    # ctl = np.take(ctl,
+    #                 np.random.permutation(ctl.shape[0]),
+    #                 axis=0)
     
     z = np.transpose(np.matrix(ctl))
     
@@ -493,8 +499,8 @@ for r in np.arange(0,bs_reps):
     cov_z2 = np.dot(z2c,z2c.T) / z2c.shape[1]
     
     # Hannart scheme:
-    x_t = Xc # initial x
-    y_t = yc # y
+    x_t = deepcopy(Xc) # initial x
+    y_t = deepcopy(yc) # y
     beta_t = beta_calc( # initial beta
         x_t,
         cov_z1,
@@ -504,21 +510,32 @@ for r in np.arange(0,bs_reps):
     while gamma_i >= gamma:
         for i in range(x_t.shape[1]): # step 1; "s1"
             if i == 0:
-                om = cov_omega_sqrt['hist-noLu'] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
+                om = cov_omega['hist-noLu'] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
                 j = 1
             else:
-                om = cov_omega_sqrt['lu']
+                om = cov_omega['lu']
                 j = 0
-            cov_prod = np.dot(np.dot(om,cov_z1),om)
-            w,v = spla.eigh(cov_prod)
-            delta = np.diag(w)
-            # m1 = delta + beta_t[0,i]**2 * np.identity(len(w))
-            m1 = np.real(spla.inv(np.matrix((delta + beta_t[0,i]**2 * np.identity(len(w))))))
-            y_bar = y_t - beta_t[0,j]*x_t[:,i]
-            m2 = beta_t[0,i]*y_bar + np.dot(delta,x_t[:,i])
-            x_t[:,i] = np.dot(m1,m2)
+            y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+            x_t_i = x_t[:,i]
+            beta_t_i = beta_t[0,i]
+            x_t[:,i] = it_step1( # it_step1
+                om,
+                beta_t_i,
+                cov_z1,
+                y_bar_i,
+                x_t_i,
+                comp,
+            )
             
-            x_t =
+                
+            # cov_prod = np.dot(np.dot(om,cov_z1),om)
+            # w,v = spla.eigh(cov_prod)
+            # delta = np.diag(w)
+            # # m1 = delta + beta_t[0,i]**2 * np.identity(len(w))
+            # m1 = np.real(spla.inv(np.matrix((delta + beta_t[0,i]**2 * np.identity(len(w))))))
+            # # y_bar = y_t - beta_t[0,j]*x_t[:,i]
+            # m2 = beta_t[0,i]*y_bar + np.dot(delta,x_t[:,i])
+
             
         
         gamma_i = ... # redefine gamma score for while loop
