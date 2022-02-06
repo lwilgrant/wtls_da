@@ -348,9 +348,14 @@ def beta_calc(
 
 #%%============================================================================
 
+def is_pos_def(x):
+    return np.all(np.linalg.eigvals(x) > 0)
+
+#%%============================================================================
+
 def it_step1(
     cov_mod, # om
-    beta_t, # beta_t_i
+    bt, # beta_t_i
     cov_pic, # cov_z1
     y_bar_t, # y_bar_i
     x_t, # x_t_i
@@ -359,19 +364,27 @@ def it_step1(
     
     if comp == 's1': # original eqn for step 1
         
-        cov_mod_inv = np.real(spla.inv(cov_mod))
-        cov_pic_inv = np.real(spla.inv(cov_pic))
-        m1 = np.real(
-            spla.inv(
+        # cov_mod_inv = np.real(spla.inv(cov_mod))
+        cov_mod_inv = spla.inv(cov_mod)
+        # cov_pic_inv = np.real(spla.inv(cov_pic))
+        cov_pic_inv = spla.inv(cov_pic)
+        # m1 = np.real(
+        #     spla.inv(
+        #         np.matrix(
+        #             (cov_mod_inv + np.dot(bt**2,cov_pic_inv))
+        #             )
+        #         )
+        #     )
+        m1 = spla.inv(
                 np.matrix(
-                    (cov_mod_inv + np.dot(beta_t**2,cov_pic_inv))
+                    (cov_mod_inv + np.dot(bt**2,cov_pic_inv))
                     )
-                )
-            )
+                )  
         m2 = np.matrix(
-            (beta_t * np.dot(cov_pic_inv,y_bar_t) + np.dot(cov_mod_inv,x_t))
+            (bt * np.dot(cov_pic_inv,y_bar_t) + np.dot(cov_mod_inv,x_t))
             )
         x_t_ast = np.dot(m1,m2)
+        test1 = np.dot(m1,m2)
         
     elif comp == 'd1': # appendix D/ eqn D1 for step 1
         
@@ -379,26 +392,25 @@ def it_step1(
         cov_prod = np.dot(np.dot(cov_mod_sqrt,cov_pic),cov_mod_sqrt)
         w,v = spla.eigh(cov_prod)
         delta = np.diag(w)
-        # m1 = np.real(
-        #     spla.inv(
-        #         np.matrix(
-        #             (delta + beta_t**2 * np.identity(len(w)))
-        #             )
-        #         )
-        #     )
         m1 = spla.inv(
                 np.matrix(
-                    (delta + beta_t**2 * np.identity(len(w)))
+                    (delta + bt**2 * np.identity(len(w)))
                     )
                 )
                 
         y_bar_tlde = np.dot(np.dot(v,cov_mod_sqrt),y_bar_t)
         x_t_tlde = np.dot(np.dot(v,cov_mod_sqrt),x_t)
-        m2 = beta_t * y_bar_tlde + np.dot(delta,x_t_tlde)
+        # m2 = bt * y_bar_tlde + np.dot(delta,x_t_tlde)
+        m2 = np.matrix(
+            (bt * y_bar_tlde + np.dot(delta,x_t_tlde))
+            )
         x_t_tlde = np.dot(m1,m2) # test for i=1 (lu) against normal eqn to see if this needs further transformation to undo tlde
         x_t_ast = np.dot(
             spla.inv(cov_mod_sqrt),np.dot(spla.inv(v),x_t_tlde)
             )
+        test2 = np.dot(
+            np.dot(spla.inv(cov_mod_sqrt),spla.inv(v)),x_t_tlde
+            )        
         
     return x_t_ast
 

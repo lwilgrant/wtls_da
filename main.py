@@ -374,8 +374,11 @@ models.append('mmm')
 obs = 'berkley_earth'
 mod = 'CanESM5'
 gamma = 0.05 # precision level
-om_bs = 100
-comp = 'd1'
+om_bs = 100 # boot straps for omega as model covariance
+om_comp = 'H2014' # or 'G2020'; in G2020, only bootstrapped model cov is used for omega; in H2014, bootstrapped model cov is added to PIC cov
+s1_comp = 'd1' # computation type for step 1 of iteration; "s1" for original, and "d1" for appendix
+
+
 nx = nx[mod]
     
 var_sfs[obs] = {}
@@ -466,67 +469,93 @@ for exp in exp_list:
     
     omega = bs_smp
     cov_omega[exp] = np.dot(omega,omega.T) / omega.shape[1]
-    cov_omega_sqrt[exp] = spla.fractional_matrix_power(cov_omega[exp], -0.5)
+    # cov_omega_sqrt[exp] = spla.fractional_matrix_power(cov_omega[exp], -0.5)
 
 
 # pic based IV estimates
-for r in np.arange(0,bs_reps):
+# for r in np.arange(0,bs_reps):
     
     # # shuffle rows of ctl
     # ctl = np.take(ctl,
     #                 np.random.permutation(ctl.shape[0]),
     #                 axis=0)
     
-    z = np.transpose(np.matrix(ctl))
-    
-    # create even sample numbered z1 and z2 samples of IV
-    nb_runs_ctl = np.shape(z)[1]
-    half_1_end = int(np.floor(nb_runs_ctl / 2))
-    z1 = z[:,:half_1_end]
-    if nb_runs_ctl % 2 == 0:
-        z2 = z[:,half_1_end:]
-    else:
-        z2 = z[:,half_1_end+1:]    
-        
-    ## Regularised covariance matrix
-    z1c = np.dot(U, z1)
-    z2c = np.dot(U, z2)
-    # Cf = regC(Z1c.T) # will test hannart algo later with this regularized estimate
+z = np.transpose(np.matrix(ctl))
 
-    # normal covariance matrices from split samples
-    cov_z1 = np.dot(z1c,z1c.T) / z1c.shape[1]
-    # cov_z1_inv = np.real(spla.inv(cov_z1))
-    cov_z2 = np.dot(z2c,z2c.T) / z2c.shape[1]
+# create even sample numbered z1 and z2 samples of IV
+nb_runs_ctl = np.shape(z)[1]
+half_1_end = int(np.floor(nb_runs_ctl / 2))
+z1 = z[:,:half_1_end]
+if nb_runs_ctl % 2 == 0:
+    z2 = z[:,half_1_end:]
+else:
+    z2 = z[:,half_1_end+1:]    
     
-    # Hannart scheme:
-    x_t = deepcopy(Xc) # initial x
-    y_t = deepcopy(yc) # y
-    beta_t = beta_calc( # initial beta
-        x_t,
+## Regularised covariance matrix
+z1c = np.dot(U, z1)
+z2c = np.dot(U, z2)
+# Cf = regC(Z1c.T) # will test hannart algo later with this regularized estimate
+
+# normal covariance matrices from split samples
+cov_z1 = np.dot(z1c,z1c.T) / z1c.shape[1]
+if om_comp == 'H2014':
+    for exp in exp_list:
+        cov_omega[exp] = cov_z1 / runs + cov_omega[exp]
+else:
+    pass
+# cov_z1_inv = np.real(spla.inv(cov_z1))
+cov_z2 = np.dot(z2c,z2c.T) / z2c.shape[1]
+
+# Hannart scheme:
+x_t = deepcopy(Xc) # initial x
+y_t = deepcopy(yc) # y
+beta_t = beta_calc( # initial beta
+    x_t,
+    cov_z1,
+    y_t,
+)
+
+test = {} #temporary for comparing s1 and d1
+for exp in exp_list:
+    test[exp] = {}
+# gamma_i = 1
+# while gamma_i >= gamma:
+# for i,exp in zip(range(x_t.shape[1]),exp_list): # step 1; "s1"
+exp = 'hist-noLu'
+i = 0
+if i == 0:
+    om = cov_omega[exp] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
+    j = 1
+else:
+    om = cov_omega[exp]
+    j = 0
+y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+x_t_i = x_t[:,i]
+beta_t_i = beta_t[0,i]
+# x_t[:,i] = it_step1( # it_step1
+#     om,
+#     beta_t_i,
+#     cov_z1,
+#     y_bar_i,
+#     x_t_i,
+#     s1_comp,
+# )
+for c in ['s1','d1']:
+    test[exp][c] = it_step1( # it_step1
+        om,
+        beta_t_i,
         cov_z1,
-        y_t,
-    )
-    gamma_i = 1
-    while gamma_i >= gamma:
-        for i in range(x_t.shape[1]): # step 1; "s1"
-            if i == 0:
-                om = cov_omega['hist-noLu'] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
-                j = 1
-            else:
-                om = cov_omega['lu']
-                j = 0
-            y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
-            x_t_i = x_t[:,i]
-            beta_t_i = beta_t[0,i]
-            x_t[:,i] = it_step1( # it_step1
-                om,
-                beta_t_i,
-                cov_z1,
-                y_bar_i,
-                x_t_i,
-                comp,
-            )
-            
+        y_bar_i,
+        x_t_i,
+        c,
+    )         
+# rexpressing vars for testing in func it_step1 between s1 and d1            
+cov_mod = om
+bt = beta_t_i
+cov_pic = cov_z1
+y_bar_t = y_bar_i          
+x_t = x_t_i     
+# np.linalg.cholesky(cov_omega['hist-noLu'])
                 
             # cov_prod = np.dot(np.dot(om,cov_z1),om)
             # w,v = spla.eigh(cov_prod)
