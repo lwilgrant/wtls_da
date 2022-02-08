@@ -263,6 +263,75 @@ def da_ensembler(data):
 
 #%%============================================================================
 
+def omega_calc(
+    exp_list,
+    nb_runs_x,
+    omega_samples,
+    mod,
+    U,
+    om_bs):  
+    """
+    Bootstrapping model data for omega; this gets adjusted in combo with pic covariance for true omega
+    """       
+        
+    cov_omega = {}
+    cov_omega_sqrt = {}
+    for exp in exp_list:
+        if exp == 'historical':
+            runs = nb_runs_x[0,0]
+        elif exp == 'hist-noLu' or exp == 'lu':
+            runs = nb_runs_x[0,1]
+        omega = omega_samples[mod][exp]
+        omega = np.transpose(np.matrix(omega))
+        omega = np.dot(U, omega)
+        for i in np.arange(om_bs):
+            boot = np.empty_like(omega)
+            for r in range(runs):
+                if exp == 'historical' or exp == 'hist-noLu':
+                    index = np.random.randint(0,omega.shape[1])
+                    boot[:,r] = np.array(omega[:,index])
+                elif exp == 'lu': # sample randomly from historical and histnolu for lu bootsrap
+                    om_h = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['historical'])))
+                    om_hnl = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['hist-noLu'])))
+                    index_h = np.random.randint(0,om_h.shape[1])
+                    index_hnl = np.random.randint(0,om_hnl.shape[1])
+                    boot[:,r] = np.array(om_h[:,index_h]) - np.array(om_hnl[:,index_hnl])
+            if i == 0:
+                bs_smp = np.mean(boot,axis=1)
+            else:
+                bs_smp = np.hstack((bs_smp,np.mean(boot,axis=1)))
+        
+        omega = bs_smp
+        cov_omega[exp] = np.dot(omega,omega.T) / omega.shape[1]
+        
+    return cov_omega
+
+#%%============================================================================
+
+def log_likelihood(
+    y,
+    x_t,
+    beta,
+    cov,
+    x,
+    omega,
+    exp_list
+    ):
+    """
+    Eqn 2 from hannart
+    """
+    p1 = (y - np.dot(x_t,np.transpose(beta)))
+    p1 = -0.5 * np.dot(np.dot(np.transpose(p1),spla.inv(cov)),p1)
+    p2 = 0
+    for i,exp in zip(range(x_t.shape[1]),exp_list):
+        p2b = (x[:,i] - x_t[:,i])
+        prod = np.dot(np.dot(np.transpose(p2b),spla.inv(omega[exp])),p2b)
+        p2 += prod
+    l = p1 - 0.5 * p2
+    return beta,l
+
+#%%============================================================================
+
 def eigvalvec(C):
     """
     Eigenvalue / Eigenvector calculation
@@ -384,7 +453,7 @@ def it_step1(
             (bt * np.dot(cov_pic_inv,y_bar_t) + np.dot(cov_mod_inv,x_t))
             )
         x_t_ast = np.dot(m1,m2)
-        test1 = np.dot(m1,m2)
+        # test1 = np.dot(m1,m2)
         
     elif comp == 'd1': # appendix D/ eqn D1 for step 1
         
@@ -408,9 +477,9 @@ def it_step1(
         x_t_ast = np.dot(
             spla.inv(cov_mod_sqrt),np.dot(spla.inv(v),x_t_tlde)
             )
-        test2 = np.dot(
-            np.dot(spla.inv(cov_mod_sqrt),spla.inv(v)),x_t_tlde
-            )        
+        # test2 = np.dot(
+        #     np.dot(spla.inv(cov_mod_sqrt),spla.inv(v)),x_t_tlde
+        #     )        
         
     return x_t_ast
 
@@ -726,6 +795,8 @@ def da_run(
     # Statistical estimation
     ## Regularised covariance matrix
     Cf = regC(Z1c.T)
+    Cf12 = np.real(spla.inv(spla.sqrtm(Cf))) # Matrix is singular and may not have a square root. can be ignored
+    Cfp12 = np.real(spla.sqrtm(Cf)) #Matrix is singular and may not have a square root. can be ignored
     
     # normal covariance matrices from split samples
     cov_Z1 = np.dot(Z1c,Z1c.T) / Z1c.shape[1]

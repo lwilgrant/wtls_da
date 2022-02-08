@@ -23,9 +23,11 @@ Created on Wed Jul  1 16:52:49 2020
 
 # import sys
 import os
+from re import L
 import numpy as np
 import pickle as pk
 import scipy.linalg as spla
+import math
 from funcs import *
 
 #%%============================================================================
@@ -373,42 +375,42 @@ models.append('mmm')
 
 obs = 'berkley_earth'
 mod = 'CanESM5'
-gamma = 0.05 # precision level
+gamma = 0.2 # precision level
 om_bs = 100 # boot straps for omega as model covariance
-om_comp = 'H2014' # or 'G2020'; in G2020, only bootstrapped model cov is used for omega; in H2014, bootstrapped model cov is added to PIC cov
-s1_comp = 'd1' # computation type for step 1 of iteration; "s1" for original, and "d1" for appendix
-
-
+om_comp = 'H2014tr' # or 'G2020' or 'H2014tr'; 
+    # in G2020, only bootstrapped model cov is used for omega; in H2014, bootstrapped model cov is added to PIC cov
+    # in H2014tr, do H2014 but adjust for not just adding mod to pic cov; instead compute trace of mod cov and add tr(mod_cov)*identity to pic_cov/runs
+s1_comp = 's1' # computation type for step 1 of iteration; "s1" for original, and "d1" for appendix
 nx = nx[mod]
     
-var_sfs[obs] = {}
-bhi[obs] = {}
-b[obs] = {}
-blow[obs] = {}
-pval[obs] = {}
-var_fin[obs] = {}
-var_ctlruns[obs] = {}
-U[obs] = {}
-yc[obs] = {}
-Z1c[obs] = {}
-Z2c[obs] = {}
-Xc[obs] = {}
-Cf1[obs] = {}
-Ft[obs] = {}
-beta_hat[obs] = {}
+# var_sfs[obs] = {}
+# bhi[obs] = {}
+# b[obs] = {}
+# blow[obs] = {}
+# pval[obs] = {}
+# var_fin[obs] = {}
+# var_ctlruns[obs] = {}
+# U[obs] = {}
+# yc[obs] = {}
+# Z1c[obs] = {}
+# Z2c[obs] = {}
+# Xc[obs] = {}
+# Cf1[obs] = {}
+# Ft[obs] = {}
+# beta_hat[obs] = {}
         
-bhi[obs][mod] = {}
-b[obs][mod] = {}
-blow[obs][mod] = {}
-pval[obs][mod] = {}
-var_fin[obs][mod] = {}
+# bhi[obs][mod] = {}
+# b[obs][mod] = {}
+# blow[obs][mod] = {}
+# pval[obs][mod] = {}
+# var_fin[obs][mod] = {}
             
-for exp in exp_list:
+# for exp in exp_list:
     
-    bhi[obs][mod][exp] = []
-    b[obs][mod][exp] = []
-    blow[obs][mod][exp] = []
-    pval[obs][mod][exp] = []
+#     bhi[obs][mod][exp] = []
+#     b[obs][mod][exp] = []
+#     blow[obs][mod][exp] = []
+#     pval[obs][mod][exp] = []
     
 y = obs_data[obs][mod]
 X = fp[mod]
@@ -439,37 +441,15 @@ yc = np.dot(U, y)
 Xc = np.dot(U, X)
 proj = np.identity(X.shape[1]) # already took factorial LU, so no need for proj to use dot to decipher histnl + lu from hist, histnl
 
-# model based uncertainty estimate                   
-cov_omega = {}
-cov_omega_sqrt = {}
-for exp in exp_list:
-    if exp == 'historical':
-        runs = nb_runs_x[0,0]
-    elif exp == 'hist-noLu' or 'lu':
-        runs = nb_runs_x[0,1]
-    omega = omega_samples[mod][exp]
-    omega = np.transpose(np.matrix(omega))
-    omega = np.dot(U, omega)
-    for i in np.arange(om_bs):
-        boot = np.empty_like(omega)
-        for r in range(runs):
-            if exp == 'historical' or 'hist-noLu':
-                index = np.random.randint(0,omega.shape[1])
-                boot[:,r] = np.array(omega[:,index])
-            elif exp == 'lu': # sample randomly from historical and histnolu for lu bootsrap
-                om_h = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['historical'])))
-                om_hnl = np.dot(U,np.transpose(np.matrix(omega_samples[mod]['hist-noLu'])))
-                index_h = np.random.randint(0,om_h.shape[1])
-                index_hnl = np.random.randint(0,om_hnl.shape[1])
-                boot[:,r] = np.array(om_h[:,index_h]) - np.array(om_hnl[:,index_hnl])
-        if i == 0:
-            bs_smp = np.mean(boot,axis=1)
-        else:
-            bs_smp = np.hstack((bs_smp,np.mean(boot,axis=1)))
-    
-    omega = bs_smp
-    cov_omega[exp] = np.dot(omega,omega.T) / omega.shape[1]
-    # cov_omega_sqrt[exp] = spla.fractional_matrix_power(cov_omega[exp], -0.5)
+# model based uncertainty estimate   
+cov_omega = omega_calc(
+    exp_list,
+    nb_runs_x,
+    omega_samples,
+    mod,
+    U,
+    om_bs
+)
 
 
 # pic based IV estimates
@@ -500,61 +480,125 @@ z2c = np.dot(U, z2)
 cov_z1 = np.dot(z1c,z1c.T) / z1c.shape[1]
 if om_comp == 'H2014':
     for exp in exp_list:
-        cov_omega[exp] = cov_z1 / runs + cov_omega[exp]
+        if om_comp == 'H2014tr':
+            cov_omega[exp] = np.trace(cov_omega[exp]) * np.eye(cov_omega[exp].shape[0])
+        cov_omega[exp] = cov_z1 / nb_runs_x[0,1] + cov_omega[exp] # nb_runs_x only configured for 2-way with histnolu and lu
 else:
     pass
-# cov_z1_inv = np.real(spla.inv(cov_z1))
 cov_z2 = np.dot(z2c,z2c.T) / z2c.shape[1]
 
-# Hannart scheme:
+#%%============================================================================
+# Hannart scheme
+#==============================================================================
+
 x_t = deepcopy(Xc) # initial x
 y_t = deepcopy(yc) # y
-beta_t = beta_calc( # initial beta
+beta_0 = beta_calc( # initial beta
     x_t,
     cov_z1,
     y_t,
 )
 
-test = {} #temporary for comparing s1 and d1
-for exp in exp_list:
-    test[exp] = {}
-# gamma_i = 1
-# while gamma_i >= gamma:
-# for i,exp in zip(range(x_t.shape[1]),exp_list): # step 1; "s1"
-exp = 'hist-noLu'
-i = 0
-if i == 0:
-    om = cov_omega[exp] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
-    j = 1
-else:
-    om = cov_omega[exp]
-    j = 0
-y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
-x_t_i = x_t[:,i]
-beta_t_i = beta_t[0,i]
-# x_t[:,i] = it_step1( # it_step1
-#     om,
-#     beta_t_i,
-#     cov_z1,
-#     y_bar_i,
-#     x_t_i,
-#     s1_comp,
-# )
-for c in ['s1','d1']:
-    test[exp][c] = it_step1( # it_step1
-        om,
-        beta_t_i,
-        cov_z1,
-        y_bar_i,
-        x_t_i,
-        c,
-    )         
+beta_list = []
+l_list = []
+
+gamma_i = 1
+it = 0
+while np.all(gamma_i) >= gamma: 
+    for i,exp in zip(range(x_t.shape[1]),exp_list): # step 1; "s1"
+        if i == 0:
+            om = cov_omega[exp] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
+            j = 1
+        else:
+            om = cov_omega[exp]
+            j = 0
+        # y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+        x_t_i = x_t[:,i]
+        if it == 0:
+            y_bar_i = y_t - beta_0[0,j]*x_t[:,i]
+            beta_t_i = beta_0[0,i]
+        else:
+            y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+            beta_t_i = beta_t[0,i]
+        x_t[:,i] = it_step1( # it_step1
+            om,
+            beta_t_i,
+            cov_z1,
+            y_bar_i,
+            x_t_i,
+            s1_comp
+            )
+    if it == 0:
+        beta_t = beta_calc( # it_step2
+            x_t,
+            cov_z1,
+            y_t,
+            )
+        gamma_i = np.abs((beta_t - beta_0)) / np.abs(beta_0) # target gamma
+    else:
+        beta_t1 = beta_calc( # it_step2
+            x_t,
+            cov_z1,
+            y_t,
+            )
+        gamma_i = np.abs((beta_t1 - beta_t)) / np.abs(beta_t) # target gamma
+        graph_beta,graph_l = log_likelihood(
+            y_t,
+            x_t,
+            beta_t1,
+            cov_z1,
+            Xc,
+            cov_omega,
+            exp_list
+        )
+        beta_list.append(graph_beta)
+        l_list.append(float(graph_l))
+        # l_list.append(math.exp(float(graph_l)))
+        
+    it += 1
+    
+    
+def log_likelihood(
+    y,
+    x_t,
+    beta,
+    cov,
+    x,
+    omega,
+    exp_list
+    ):
+    """
+    Eqn 2 from hannart
+    """
+    p1 = (y - np.dot(x_t,np.transpose(beta)))
+    p1 = -0.5 * np.dot(np.dot(np.transpose(p1),spla.inv(cov)),p1)
+    p2 = 0
+    for i,exp in zip(range(x_t.shape[1]),exp_list):
+        p2b = (x[:,i] - x_t[:,i])
+        prod = np.dot(np.dot(np.transpose(p2b),spla.inv(omega[exp])),p2b)
+        p2 += prod
+    l = p1 + p2
+    return beta,l
+    
+
+    
+    
+    
+# for c in ['s1','d1']:
+#     test[exp][c] = it_step1( # it_step1
+#         om,
+#         beta_t_i,
+#         cov_z1,
+#         y_bar_i,
+#         x_t_i,
+#         c,
+#     )         
 # rexpressing vars for testing in func it_step1 between s1 and d1            
-cov_mod = om
-bt = beta_t_i
-cov_pic = cov_z1
-y_bar_t = y_bar_i          
-x_t = x_t_i     
+# cov_mod = om
+# bt = beta_t_i
+# cov_pic = cov_z1
+# y_bar_t = y_bar_i          
+# x_t = x_t_i     
 # np.linalg.cholesky(cov_omega['hist-noLu'])
                 
             # cov_prod = np.dot(np.dot(om,cov_z1),om)
@@ -567,7 +611,7 @@ x_t = x_t_i
 
             
         
-        gamma_i = ... # redefine gamma score for while loop
+    
      
     
     
@@ -578,120 +622,120 @@ x_t = x_t_i
 # plotting scaling factors
 #==============================================================================    
 
-if analysis == 'global':
+# if analysis == 'global':
     
-    plot_scaling_global(models,
-                        grid,
-                        obs_types,
-                        pi,
-                        agg,
-                        weight,
-                        exp_list,
-                        var_fin,
-                        freq,
-                        reg,
-                        flag_svplt,
-                        outDIR)
+#     plot_scaling_global(models,
+#                         grid,
+#                         obs_types,
+#                         pi,
+#                         agg,
+#                         weight,
+#                         exp_list,
+#                         var_fin,
+#                         freq,
+#                         reg,
+#                         flag_svplt,
+#                         outDIR)
 
-elif analysis == 'continental':
+# elif analysis == 'continental':
     
     
-    plot_scaling_map_continental(sfDIR,
-                                 obs_types,
-                                 pi,
-                                 agg,
-                                 weight,
-                                 models,
-                                 exp_list,
-                                 continents,
-                                 var_fin,
-                                 grid,
-                                 letters,
-                                 flag_svplt,
-                                 outDIR)
+#     plot_scaling_map_continental(sfDIR,
+#                                  obs_types,
+#                                  pi,
+#                                  agg,
+#                                  weight,
+#                                  models,
+#                                  exp_list,
+#                                  continents,
+#                                  var_fin,
+#                                  grid,
+#                                  letters,
+#                                  flag_svplt,
+#                                  outDIR)
 
-elif analysis == 'ar6':
+# elif analysis == 'ar6':
     
-    plot_scaling_map_ar6(sfDIR,
-                         obs_types,
-                         pi,
-                         models,
-                         exp_list,
-                         continents,
-                         var_fin,
-                         grid,
-                         letters,
-                         flag_svplt,
-                         outDIR)              
+#     plot_scaling_map_ar6(sfDIR,
+#                          obs_types,
+#                          pi,
+#                          models,
+#                          exp_list,
+#                          continents,
+#                          var_fin,
+#                          grid,
+#                          letters,
+#                          flag_svplt,
+#                          outDIR)              
     
-elif analysis == 'combined':
+# elif analysis == 'combined':
     
-    os.chdir(curDIR)    
-    models.append('mmm')
-    if len(exp_list) == 2:
+#     os.chdir(curDIR)    
+#     models.append('mmm')
+#     if len(exp_list) == 2:
         
-        os.chdir(pklDIR)
+#         os.chdir(pklDIR)
         
-        pkl_file_cnt = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_cnt = pk.load(pkl_file_cnt)
-        pkl_file_cnt.close()
+#         pkl_file_cnt = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_cnt = pk.load(pkl_file_cnt)
+#         pkl_file_cnt.close()
         
-        pkl_file_glb = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_glb = pk.load(pkl_file_glb) 
-        pkl_file_glb.close()       
+#         pkl_file_glb = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_glb = pk.load(pkl_file_glb) 
+#         pkl_file_glb.close()       
 
-    elif len(exp_list) == 1:
+#     elif len(exp_list) == 1:
         
-        start_exp = deepcopy(exp_list[0])
-        if start_exp == 'historical':
-            second_exp = 'hist-noLu'
-        elif start_exp == 'hist-noLu':
-            second_exp = 'historical'
+#         start_exp = deepcopy(exp_list[0])
+#         if start_exp == 'historical':
+#             second_exp = 'hist-noLu'
+#         elif start_exp == 'hist-noLu':
+#             second_exp = 'historical'
             
-        os.chdir(pklDIR)
-        pkl_file_cnt = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_cnt = pk.load(pkl_file_cnt)
-        pkl_file_cnt.close()
+#         os.chdir(pklDIR)
+#         pkl_file_cnt = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_cnt = pk.load(pkl_file_cnt)
+#         pkl_file_cnt.close()
         
-        pkl_file_cnt_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_cnt_2 = pk.load(pkl_file_cnt_2)
-        pkl_file_cnt_2.close()        
+#         pkl_file_cnt_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_cnt_2 = pk.load(pkl_file_cnt_2)
+#         pkl_file_cnt_2.close()        
         
-        pkl_file_glb = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_glb = pk.load(pkl_file_glb)
-        pkl_file_glb.close()
+#         pkl_file_glb = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_glb = pk.load(pkl_file_glb)
+#         pkl_file_glb.close()
         
-        pkl_file_glb_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-        var_fin_glb_2 = pk.load(pkl_file_glb_2)
-        pkl_file_glb_2.close()        
+#         pkl_file_glb_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
+#         var_fin_glb_2 = pk.load(pkl_file_glb_2)
+#         pkl_file_glb_2.close()        
         
-        for obs in obs_types:
-            for mod in models:
-                var_fin_cnt[obs][mod][second_exp] = var_fin_cnt_2[obs][mod].pop(second_exp)        
+#         for obs in obs_types:
+#             for mod in models:
+#                 var_fin_cnt[obs][mod][second_exp] = var_fin_cnt_2[obs][mod].pop(second_exp)        
         
-        for obs in obs_types:
-            for mod in models:
-                var_fin_glb[obs][mod][second_exp] = var_fin_glb_2[obs][mod].pop(second_exp)
+#         for obs in obs_types:
+#             for mod in models:
+#                 var_fin_glb[obs][mod][second_exp] = var_fin_glb_2[obs][mod].pop(second_exp)
                 
-        exp_list = ['historical', 'hist-noLu']    
+#         exp_list = ['historical', 'hist-noLu']    
     
-    plot_scaling_map_combined(
-        sfDIR,
-        obs_types,
-        pi,
-        weight,
-        models,
-        exp_list,
-        var_fin_cnt,
-        var_fin_glb,
-        grid,
-        letters,
-        freq,
-        flag_svplt,
-        outDIR
-        )    
+#     plot_scaling_map_combined(
+#         sfDIR,
+#         obs_types,
+#         pi,
+#         weight,
+#         models,
+#         exp_list,
+#         var_fin_cnt,
+#         var_fin_glb,
+#         grid,
+#         letters,
+#         freq,
+#         flag_svplt,
+#         outDIR
+#         )    
          
     
     
 
-# %%
+# # %%
