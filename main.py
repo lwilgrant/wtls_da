@@ -374,14 +374,16 @@ beta_hat = {}
 models.append('mmm')   
 
 obs = 'berkley_earth'
-mod = 'CanESM5'
-gamma = 0.2 # precision level
+mod = 'IPSL-CM6A-LR'
+cov1_comp = 'regC' # for ledoit and wolf regularized estimate or 'C' for normal covariance
+gamma = 0.3 # precision level
 om_bs = 100 # boot straps for omega as model covariance
-om_comp = 'H2014tr' # or 'G2020' or 'H2014tr'; 
+om_comp = 'H2014' # or 'G2020' or 'H2014_modtr' or 'H2014tr'; 
     # in G2020, only bootstrapped model cov is used for omega; in H2014, bootstrapped model cov is added to PIC cov
-    # in H2014tr, do H2014 but adjust for not just adding mod to pic cov; instead compute trace of mod cov and add tr(mod_cov)*identity to pic_cov/runs
+    # in H2014_modtr, do H2014 but instead compute trace of mod cov and add tr(mod_cov)*identity to pic_cov/runs
+    # in H2014, full hannart routine; no use of covariance estimates from fingerprints to get delta
 s1_comp = 's1' # computation type for step 1 of iteration; "s1" for original, and "d1" for appendix
-nx = nx[mod]
+n_runs = nx[mod]
     
 # var_sfs[obs] = {}
 # bhi[obs] = {}
@@ -422,7 +424,7 @@ elif pi == 'allpi':
 # input vectors
 y = np.matrix(y).T
 X = np.matrix(X).T
-nb_runs_x = np.matrix(nx)
+nb_runs_x = np.matrix(n_runs)
 nbts = nt # number t-steps
 n_spa = ns # spatial dim
 n_st = n_spa * nbts # spatio_temporal dimension (ie dimension of y)
@@ -442,15 +444,17 @@ Xc = np.dot(U, X)
 proj = np.identity(X.shape[1]) # already took factorial LU, so no need for proj to use dot to decipher histnl + lu from hist, histnl
 
 # model based uncertainty estimate   
-cov_omega = omega_calc(
-    exp_list,
-    nb_runs_x,
-    omega_samples,
-    mod,
-    U,
-    om_bs
-)
-
+if om_comp != 'H2014':
+    cov_omega = omega_calc(
+        exp_list,
+        nb_runs_x,
+        omega_samples,
+        mod,
+        U,
+        om_bs
+    )
+else:
+    cov_omega = {}
 
 # pic based IV estimates
 # for r in np.arange(0,bs_reps):
@@ -478,30 +482,58 @@ z2c = np.dot(U, z2)
 
 # normal covariance matrices from split samples
 cov_z1 = np.dot(z1c,z1c.T) / z1c.shape[1]
-if om_comp == 'H2014':
+if cov1_comp == 'regC':
+    cov_z1 = regC(z1c.T)
+if om_comp != 'H2014':
     for exp in exp_list:
-        if om_comp == 'H2014tr':
-            cov_omega[exp] = np.trace(cov_omega[exp]) * np.eye(cov_omega[exp].shape[0])
+        if om_comp == 'H2014_modtr':
+            cov_omega[exp] = np.trace(cov_omega[exp]) * np.eye(cov_omega[exp].shape[0]) / cov_omega[exp].shape[0] 
         cov_omega[exp] = cov_z1 / nb_runs_x[0,1] + cov_omega[exp] # nb_runs_x only configured for 2-way with histnolu and lu
-else:
-    pass
+elif om_comp == 'H2014':
+    for exp in exp_list:
+        cov_omega[exp] = cov_z1 / nb_runs_x[0,1] + np.trace(cov_z1) * np.eye(cov_z1.shape[0]) / cov_z1.shape[0]
 cov_z2 = np.dot(z2c,z2c.T) / z2c.shape[1]
 
 #%%============================================================================
-# Hannart scheme
+# Hannart scheme - virtual
 #==============================================================================
 
-x_t = deepcopy(Xc) # initial x
-y_t = deepcopy(yc) # y
+# input data; "knowns"
+n1 = z1c.shape[1]
+n2 = z2c.shape[1]
+x_start = deepcopy(Xc) # "reference" x
+k = x_start.shape[1] 
+beta_1 = np.ones((k,1)) # "true" beta
+sigma12 = spla.sqrtm(cov_z1)
+n = sigma12.shape[0]
+runs = np.matrix([[omega_samples[mod]['hist-noLu'].shape[0],omega_samples[mod]['lu'].shape[0]]]) # fudging this here for now even tho inconsistent with above
+
+# virtual data; estimated 
+yv_t = np.dot(x_start, beta_1) # "true" y
+yv_n = yv_t + np.dot(sigma12,np.random.normal(0,1,size=(n,1))) # "observed"/noised y
+xv = x_start + np.dot(sigma12, np.random.normal(0, 1, size=(n,k)) / (np.ones(yv_t.shape) * np.sqrt(runs))) # "observed"/noised x
+xv_n = np.multiply((np.dot(np.ones(yv_t.shape), np.sqrt(runs))), xv) # normalizing variance in x DONT UNDERSTAND THIS
+sigma_v = np.dot(sigma12, np.random.normal(0, 1, size=(n, n1))) # virtual Z samples
+if cov1_comp == 'regC':
+    sigma_v = regC(sigma_v.T)
+else:
+    sigma_v =  np.dot(sigma_v,sigma_v.T) / sigma_v.shape[1]
+    
+beta_list = []
+l_list = []
+gamma_list = []
+
+# rename to fit algo
+x_t = deepcopy(xv_n)
+y_t = deepcopy(yv_n)
+cov_z1 = deepcopy(sigma_v)
+
+# hannart algo
 beta_0 = beta_calc( # initial beta
     x_t,
     cov_z1,
     y_t,
 )
-
-beta_list = []
-l_list = []
-
 gamma_i = 1
 it = 0
 while np.all(gamma_i) >= gamma: 
@@ -515,8 +547,8 @@ while np.all(gamma_i) >= gamma:
         # y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
         x_t_i = x_t[:,i]
         if it == 0:
-            y_bar_i = y_t - beta_0[0,j]*x_t[:,i]
-            beta_t_i = beta_0[0,i]
+            y_bar_i = y_t - beta_0[0,j]*x_t[:,i] # check the output of this beta*x order against that inside the log likelihood; does either screw order up?
+            beta_t_i = beta_0[0,i] # comment line above answer is no because this is scalar mult and other is dot
         else:
             y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
             beta_t_i = beta_t[0,i]
@@ -553,32 +585,79 @@ while np.all(gamma_i) >= gamma:
         )
         beta_list.append(graph_beta)
         l_list.append(float(graph_l))
+        gamma_list.append(gamma_i)
         # l_list.append(math.exp(float(graph_l)))
         
     it += 1
+
+# PRESERVE BELOW FOR RETURNING TO ACTUAL DATA
+# x_t = deepcopy(Xc) # initial x
+# y_t = deepcopy(yc) # y
+# beta_0 = beta_calc( # initial beta
+#     x_t,
+#     cov_z1,
+#     y_t,
+# )
+
+# beta_list = []
+# l_list = []
+
+# gamma_i = 1
+# it = 0
+# while np.all(gamma_i) >= gamma: 
+#     for i,exp in zip(range(x_t.shape[1]),exp_list): # step 1; "s1"
+#         if i == 0:
+#             om = cov_omega[exp] # choosing sqrt is for conforming to appendix D; can switch for normal and avoid these steps
+#             j = 1
+#         else:
+#             om = cov_omega[exp]
+#             j = 0
+#         # y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+#         x_t_i = x_t[:,i]
+#         if it == 0:
+#             y_bar_i = y_t - beta_0[0,j]*x_t[:,i]
+#             beta_t_i = beta_0[0,i]
+#         else:
+#             y_bar_i = y_t - beta_t[0,j]*x_t[:,i]
+#             beta_t_i = beta_t[0,i]
+#         x_t[:,i] = it_step1( # it_step1
+#             om,
+#             beta_t_i,
+#             cov_z1,
+#             y_bar_i,
+#             x_t_i,
+#             s1_comp
+#             )
+#     if it == 0:
+#         beta_t = beta_calc( # it_step2
+#             x_t,
+#             cov_z1,
+#             y_t,
+#             )
+#         gamma_i = np.abs((beta_t - beta_0)) / np.abs(beta_0) # target gamma
+#     else:
+#         beta_t1 = beta_calc( # it_step2
+#             x_t,
+#             cov_z1,
+#             y_t,
+#             )
+#         gamma_i = np.abs((beta_t1 - beta_t)) / np.abs(beta_t) # target gamma
+#         graph_beta,graph_l = log_likelihood(
+#             y_t,
+#             x_t,
+#             beta_t1,
+#             cov_z1,
+#             Xc,
+#             cov_omega,
+#             exp_list
+#         )
+#         beta_list.append(graph_beta)
+#         l_list.append(float(graph_l))
+#         # l_list.append(math.exp(float(graph_l)))
+        
+#     it += 1
     
     
-def log_likelihood(
-    y,
-    x_t,
-    beta,
-    cov,
-    x,
-    omega,
-    exp_list
-    ):
-    """
-    Eqn 2 from hannart
-    """
-    p1 = (y - np.dot(x_t,np.transpose(beta)))
-    p1 = -0.5 * np.dot(np.dot(np.transpose(p1),spla.inv(cov)),p1)
-    p2 = 0
-    for i,exp in zip(range(x_t.shape[1]),exp_list):
-        p2b = (x[:,i] - x_t[:,i])
-        prod = np.dot(np.dot(np.transpose(p2b),spla.inv(omega[exp])),p2b)
-        p2 += prod
-    l = p1 + p2
-    return beta,l
     
 
     
@@ -600,14 +679,7 @@ def log_likelihood(
 # y_bar_t = y_bar_i          
 # x_t = x_t_i     
 # np.linalg.cholesky(cov_omega['hist-noLu'])
-                
-            # cov_prod = np.dot(np.dot(om,cov_z1),om)
-            # w,v = spla.eigh(cov_prod)
-            # delta = np.diag(w)
-            # # m1 = delta + beta_t[0,i]**2 * np.identity(len(w))
-            # m1 = np.real(spla.inv(np.matrix((delta + beta_t[0,i]**2 * np.identity(len(w))))))
-            # # y_bar = y_t - beta_t[0,j]*x_t[:,i]
-            # m2 = beta_t[0,i]*y_bar + np.dot(delta,x_t[:,i])
+
 
             
         
@@ -616,126 +688,3 @@ def log_likelihood(
     
     
     
-
-           
-#%%============================================================================
-# plotting scaling factors
-#==============================================================================    
-
-# if analysis == 'global':
-    
-#     plot_scaling_global(models,
-#                         grid,
-#                         obs_types,
-#                         pi,
-#                         agg,
-#                         weight,
-#                         exp_list,
-#                         var_fin,
-#                         freq,
-#                         reg,
-#                         flag_svplt,
-#                         outDIR)
-
-# elif analysis == 'continental':
-    
-    
-#     plot_scaling_map_continental(sfDIR,
-#                                  obs_types,
-#                                  pi,
-#                                  agg,
-#                                  weight,
-#                                  models,
-#                                  exp_list,
-#                                  continents,
-#                                  var_fin,
-#                                  grid,
-#                                  letters,
-#                                  flag_svplt,
-#                                  outDIR)
-
-# elif analysis == 'ar6':
-    
-#     plot_scaling_map_ar6(sfDIR,
-#                          obs_types,
-#                          pi,
-#                          models,
-#                          exp_list,
-#                          continents,
-#                          var_fin,
-#                          grid,
-#                          letters,
-#                          flag_svplt,
-#                          outDIR)              
-    
-# elif analysis == 'combined':
-    
-#     os.chdir(curDIR)    
-#     models.append('mmm')
-#     if len(exp_list) == 2:
-        
-#         os.chdir(pklDIR)
-        
-#         pkl_file_cnt = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_cnt = pk.load(pkl_file_cnt)
-#         pkl_file_cnt.close()
-        
-#         pkl_file_glb = open('var_fin_2-factor_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_glb = pk.load(pkl_file_glb) 
-#         pkl_file_glb.close()       
-
-#     elif len(exp_list) == 1:
-        
-#         start_exp = deepcopy(exp_list[0])
-#         if start_exp == 'historical':
-#             second_exp = 'hist-noLu'
-#         elif start_exp == 'hist-noLu':
-#             second_exp = 'historical'
-            
-#         os.chdir(pklDIR)
-#         pkl_file_cnt = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_cnt = pk.load(pkl_file_cnt)
-#         pkl_file_cnt.close()
-        
-#         pkl_file_cnt_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'continental',pi,'ar6',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_cnt_2 = pk.load(pkl_file_cnt_2)
-#         pkl_file_cnt_2.close()        
-        
-#         pkl_file_glb = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(start_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_glb = pk.load(pkl_file_glb)
-#         pkl_file_glb.close()
-        
-#         pkl_file_glb_2 = open('var_fin_1-factor_{}_{}-grid_{}_{}-pi_{}-agg_{}-weight_{}-bsreps_{}_{}.pkl'.format(second_exp,grid,'global',pi,'continental',weight,bs_reps,freq,t_ext),'rb')
-#         var_fin_glb_2 = pk.load(pkl_file_glb_2)
-#         pkl_file_glb_2.close()        
-        
-#         for obs in obs_types:
-#             for mod in models:
-#                 var_fin_cnt[obs][mod][second_exp] = var_fin_cnt_2[obs][mod].pop(second_exp)        
-        
-#         for obs in obs_types:
-#             for mod in models:
-#                 var_fin_glb[obs][mod][second_exp] = var_fin_glb_2[obs][mod].pop(second_exp)
-                
-#         exp_list = ['historical', 'hist-noLu']    
-    
-#     plot_scaling_map_combined(
-#         sfDIR,
-#         obs_types,
-#         pi,
-#         weight,
-#         models,
-#         exp_list,
-#         var_fin_cnt,
-#         var_fin_glb,
-#         grid,
-#         letters,
-#         freq,
-#         flag_svplt,
-#         outDIR
-#         )    
-         
-    
-    
-
-# # %%
